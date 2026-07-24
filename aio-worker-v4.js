@@ -103,6 +103,7 @@ class Dexie{
   get patterns(){return this._tbl('patterns');}
   get metacognition(){return this._tbl('metacognition');}
   get stats(){return this._tbl('stats');}
+  get propositions(){return this._tbl('propositions');}
   delete(){return new Promise((ok,ko)=>{const r=indexedDB.deleteDatabase(this._name);r.onsuccess=ok;r.onerror=ko;});}
   async open(){await this._open();return this;}
   async transaction(mode,tables,fn){await this._open();return fn();}
@@ -170,13 +171,21 @@ const MEMORY_CONFIG = {
 // DB
 // ============================================================================
 const DB = new Dexie('AIO_Brain_v4');
-DB.version(2).stores({
+// FIX CRÍTICO: 'propositions' nunca existiu no schema original — todo o
+// PropositionStore vivia apenas em memória, sem persistência real.
+// Qualquer reload do worker apagava TODO o conhecimento ensinado, enquanto
+// o grafo geométrico de nós sobrevivia (esse sim persistido correctamente),
+// causando o sintoma: "o agente lembra-se da geometria mas esquece os factos".
+// Versão subida de 2 para 3 para accionar onupgradeneeded e criar a tabela
+// nova sem afectar dados existentes nas outras tabelas.
+DB.version(3).stores({
     nodes:         '++id, type, layer, lastFired, fireCount, *signatureTokens',
     synapses:      '++id, source, target',
     episodes:      '++id, cycle, timestamp',
     patterns:      '++id, layer',
     metacognition: 'key',
-    stats:         'key'
+    stats:         'key',
+    propositions:  'id, subject, object, relation, source, state',
 });
 
 // ============================================================================
@@ -342,6 +351,9 @@ const MorphClassifier = (() => {
     'carro','filho','filha','livro','mesa','casa','porta','janela','rio','mar',
     'rocha','pedra','metal','madeira','vidro','plástico','plastico','papel',
     'comida','água','bebida','animal','planta','árvore','arvore','flor','fruto',
+    'conceito','ideia','ideia','noção','nocao','definição','definicao','categoria',
+    'classe','tipo','exemplo','instância','instancia','propriedade','atributo',
+    'característica','caracteristica','qualidade','substância','substancia',
   ]);
 
   function classify(form, raw) {
@@ -2289,8 +2301,8 @@ const SyntacticPlanner = (() => {
         score += 0.2;
       }
     }
-
-    // Boost por popularidade (fireCount normalizado)
+    
+  // Boost por popularidade (fireCount normalizado)
     const node = brain.nodes.get(candidate.nodeId);
     if (node) {
       score += Math.min(0.3, node.fireCount / 100);

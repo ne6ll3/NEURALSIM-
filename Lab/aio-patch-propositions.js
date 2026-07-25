@@ -410,10 +410,28 @@ const PropositionStore = (() => {
 
     let subject = null, predicate = null, object = null;
 
-    for (const t of meaningful) {
+    // FIX: "causa" (e qualquer futuro homónimo verbo/substantivo) está
+    // classificado como SUBSTANTIVO (NOUN_EXCEPTIONS, ver aio-worker-v4.js)
+    // E é simultaneamente gatilho da relação CAUSES (BUILTIN_VERB_OPERATORS)
+    // E é a própria etiqueta textual dessa relação ("causa"). Sem esta
+    // defesa, "causa" podia ser escolhida como sujeito e também determinar
+    // a relação, produzindo frases tautológicas do tipo "Causa causa X".
+    // Prioriza candidatos que NÃO sejam gatilho de relação; só recorre a
+    // um gatilho como sujeito se for genuinamente a única opção disponível.
+    const nonTriggerFirst = meaningful.filter(t => {
       const mc = t.psi?.morphClass || '';
-      if (['SUBSTANTIVO','PRONOME','PROPRIO','ACRONIMO','VERBO_INF'].includes(mc)) {
-        if (!subject) { subject = t; continue; }
+      const isNounLike = ['SUBSTANTIVO','PRONOME','PROPRIO','ACRONIMO','VERBO_INF'].includes(mc);
+      const isTrigger   = typeof BUILTIN_VERB_OPERATORS !== 'undefined' && (t.form in BUILTIN_VERB_OPERATORS);
+      return isNounLike && !isTrigger;
+    });
+    if (nonTriggerFirst.length > 0) {
+      subject = nonTriggerFirst[0];
+    } else {
+      for (const t of meaningful) {
+        const mc = t.psi?.morphClass || '';
+        if (['SUBSTANTIVO','PRONOME','PROPRIO','ACRONIMO','VERBO_INF'].includes(mc)) {
+          if (!subject) { subject = t; break; }
+        }
       }
     }
 
@@ -622,6 +640,14 @@ const PropositionStore = (() => {
     const spo      = _extractSPO(spoTokens, spoEnrichedTokens);
     if (!spo.subject) return null;
 
+    // FIX: bloqueia auto-referência também no caminho de linguagem natural —
+    // "Cor é um tipo de cor" nunca deveria ser persistida. Mesma protecção
+    // já aplicada em teachStructured() para dados importados.
+    if (spo.object && spo.subject.toLowerCase() === spo.object.toLowerCase()) {
+      console.warn('[PropStore] Bloqueado (auto-referencial):', spo.subject, '~', spo.object);
+      return null;
+    }
+
     // FIX: permite forçar a relação directamente (usado por /catgmn para
     // CATEGORY, que não tem um verbo-gatilho único em português — "é um
     // tipo de" é multi-palavra e não passa pela detecção automática)
@@ -768,6 +794,16 @@ const PropositionStore = (() => {
     const subject  = String(entry.subject).toLowerCase();
     const object   = entry.object != null ? String(entry.object).toLowerCase() : null;
     const polarity = entry.polarity != null ? entry.polarity : 1;
+
+    // FIX: bloqueia proposições auto-referenciais NA ESCRITA, não só na
+    // selecção de resposta. Antes desta correcção, "cor é um tipo de cor"
+    // (CATEGORY, subject===object) podia ser persistida — só era filtrada
+    // depois, em selectBest(), quando havia alternativa. Isso deixava a
+    // tautologia visível em /why e a contaminar /reconcile, mesmo nunca
+    // aparecendo numa resposta directa. Bloqueia na origem.
+    if (object && subject === object) {
+      return { ok: false, reason: 'self_referential', subject, object };
+    }
 
     // Calcula ψ real para sujeito e objecto — para que a KD-Tree, o
     // PatternLayer (zBand) e qualquer outra camada geométrica tratem

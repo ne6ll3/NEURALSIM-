@@ -344,7 +344,17 @@ const CommandParser = (() => {
     // Explica o que o agente sabe sobre um conceito específico
     const bySubj = PropositionStore.queryBySubject(target, 0, true);
     const byObj  = PropositionStore.queryByObject(target, 0, true);
-    const all    = [...bySubj, ...byObj];
+    // FIX: dedup por id — sem isto, uma proposição onde subject===object
+    // (ex: um caso auto-referencial que tenha escapado à guarda de escrita,
+    // ou legitimamente qualquer prop cujo target apareça em ambos os
+    // papéis) aparecia duplicada na listagem, porque é encontrada tanto
+    // por queryBySubject como por queryByObject.
+    const seenIds = new Set();
+    const all = [...bySubj, ...byObj].filter(p => {
+      if (seenIds.has(p.id)) return false;
+      seenIds.add(p.id);
+      return true;
+    });
 
     if (all.length === 0) return `Não tenho proposições sobre "${target}".`;
 

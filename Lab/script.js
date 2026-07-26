@@ -37,7 +37,8 @@ function initWorker() {
         '${baseUrl}aio-patch-patternlayer.js',
         '${baseUrl}aio-patch-import.js',
         '${baseUrl}aio-patch-reconciliation.js',
-          '${baseUrl}aio-patch-antipattern.js'
+          '${baseUrl}aio-patch-antipattern.js,
+          '${baseUrl}}aio-patch-semanticwalker.js'
         );
       } catch(e) {
         // Fallback: tenta só o v4 se os patches não existirem

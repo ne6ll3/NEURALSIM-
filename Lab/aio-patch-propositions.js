@@ -400,17 +400,47 @@ const PropositionStore = (() => {
   // Verifica se uma proposição conflicta com as existentes
   // Conflicto real: mesmo sujeito + mesmo objecto + mesma relação + POLARIDADE OPOSTA
   // Isso é uma contradição genuína: "X é Y" e "X não é Y" não podem coexistir
+  // Levenshtein normalizado — MESMA implementação e calibração já testada
+  // e em produção no PatternLayer (aio-patch-patternlayer.js). Reutilizada
+  // aqui deliberadamente, não reinventada — o limiar 0.85/0.85 já foi
+  // validado a não confundir "molécula:hidrogénio" com "molécula:oxigénio".
+  function _hcLevenshtein(a, b) {
+    const m = a.length, n = b.length;
+    if (m === 0) return n;
+    if (n === 0) return m;
+    const dp = Array.from({length: m+1}, () => new Array(n+1).fill(0));
+    for (let i=0;i<=m;i++) dp[i][0]=i;
+    for (let j=0;j<=n;j++) dp[0][j]=j;
+    for (let i=1;i<=m;i++) for (let j=1;j<=n;j++) {
+      const cost = a[i-1]===b[j-1] ? 0 : 1;
+      dp[i][j] = Math.min(dp[i-1][j]+1, dp[i][j-1]+1, dp[i-1][j-1]+cost);
+    }
+    return dp[m][n];
+  }
+  function _hcSimilarity(a, b) {
+    const maxLen = Math.max(a.length, b.length);
+    if (maxLen === 0) return 1;
+    return 1 - (_hcLevenshtein(a, b) / maxLen);
+  }
+  const HC_DUPLICATE_THRESHOLD = 0.85;
+
   function _hasConflict(subject, object, relation, polarity = 1) {
     const ids = _bySubject.get(subject.toLowerCase()) || new Set();
     for (const id of ids) {
       const p = _props.get(id);
       if (!p) continue;
-      if (p.object?.toLowerCase() === object?.toLowerCase() &&
-          p.relation === relation.code) {
+
+      // FIX: comparação por similaridade, não igualdade exacta. Objecto
+      // e sujeito comparados SEPARADAMENTE (nunca a string concatenada —
+      // ver nota no PatternLayer sobre falso-positivo com sujeito partilhado).
+      const objSim = _hcSimilarity((p.object||'').toLowerCase(), (object||'').toLowerCase());
+      const isNearDuplicate = objSim > HC_DUPLICATE_THRESHOLD && p.relation === relation.code;
+
+      if (isNearDuplicate) {
         if (p.polarity !== polarity) return { type: 'contradiction', existingProp: p };
         return 'duplicate';
       }
-      if (p.object?.toLowerCase() === object?.toLowerCase() && relation.code === 'OPPOSES') {
+      if (objSim > HC_DUPLICATE_THRESHOLD && relation.code === 'OPPOSES') {
         return { type: 'opposes', existingProp: p };
       }
     }
@@ -790,7 +820,9 @@ const PropositionStore = (() => {
       ];
       const existingQual = queryBySubject(compound.head, 0, true)
         .find(p => p.object?.toLowerCase() === compound.modifier.toLowerCase());
-      if (!existingQual) {
+      // FIX: guarda auto-referencial também aqui — "X de X" não devia
+      // nunca acontecer na prática, mas não estava protegido.
+      if (!existingQual && compound.head.toLowerCase() !== compound.modifier.toLowerCase()) {
         const qualProp = makeProp(compound.head, 'tem', compound.modifier, RelationTypes.HAS, {
           confidence: 0.65, source: 'inferred', cycle: opts.cycle || 0, polarity: 1, verified: false,
         });
@@ -974,6 +1006,17 @@ const PropositionStore = (() => {
     }
 
     if (inferredConf < 0.3) return null;
+
+    // FIX: bloqueia inferência auto-referencial — se a cadeia forma um
+    // ciclo (A relaciona-se com B, B relaciona-se de volta com A), a
+    // combinação transitiva produziria "A rel A", nunca detectado antes.
+    // Candidato mais provável para bugs do tipo "fogo não é fogo" vindos
+    // de inferência, não de ensino directo.
+    if (propA.subject.toLowerCase() === propB.object.toLowerCase()) {
+      console.warn('[PropStore] Inferência auto-referencial bloqueada (ciclo A→B→A):',
+        propA.subject, '/', propB.object);
+      return null;
+    }
 
     const conflict = _hasConflict(propA.subject, propB.object, rtA, resultPolarity);
     if (conflict === true) {

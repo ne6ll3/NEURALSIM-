@@ -37,6 +37,16 @@ const RelationTypes = {
   // transitiva por natureza: se A contém B e B contém C, A contém C.
   CONTAINS: { code: 'CONTAINS', label: 'contém',    inverse: 'PART_OF',  combinesWith: ['CONTAINS'] },
 
+  // PREVENTS — causalidade NEGATIVA. Distinto de CAUSES precisamente
+  // porque "água extingue fogo" NÃO é "água causa fogo" — é o oposto
+  // semântico: o sujeito termina/impede/remove o objecto, não o produz.
+  // Cobre tanto "impedir o início" quanto "terminar o que já existe" sob
+  // uma única etiqueta aproximada — distinguir os dois sentidos com
+  // precisão exigiria dois tipos de relação separados, o que não se
+  // justifica ainda pelo volume de uso. Documentado como limitação
+  // conhecida, não escondido.
+  PREVENTS: { code: 'PREVENTS', label: 'impede/termina', inverse: 'PREVENTED_BY', combinesWith: ['PREVENTS'] },
+
   // SIMILAR — semelhança/analogia. Nunca implica identidade — por
   // design, mantém-se sempre como relação fraca, nunca combina
   // transitivamente com outras relações (analogias não se encadeiam
@@ -84,6 +94,22 @@ const BUILTIN_VERB_OPERATORS = {
   // SIMILAR — semelhança/analogia (nunca implica identidade)
   'parece':'SIMILAR', 'parecer':'SIMILAR', 'assemelha':'SIMILAR', 'assemelhar':'SIMILAR',
   'lembra':'SIMILAR', 'lembrar':'SIMILAR',
+  // PREVENTS (família destrutiva/preventiva) — CORRIGIDO: estes verbos NÃO
+  // são CAUSES. "Água extingue fogo" é causalidade NEGATIVA — água não
+  // produz fogo, água ACABA com o fogo. Mapear para CAUSES faria o
+  // sistema renderizar "Água causa fogo", factualmente invertido. Este
+  // erro foi apanhado por teste isolado antes de entrega, não em produção.
+  'destrói':'PREVENTS', 'destruir':'PREVENTS', 'destruição':'PREVENTS',
+  'extingue':'PREVENTS', 'extinguir':'PREVENTS', 'extinção':'PREVENTS',
+  'apaga':'PREVENTS', 'apagar':'PREVENTS',
+  'elimina':'PREVENTS', 'eliminar':'PREVENTS', 'eliminação':'PREVENTS',
+  'impede':'PREVENTS', 'impedir':'PREVENTS',
+  'bloqueia':'PREVENTS', 'bloquear':'PREVENTS',
+  'interrompe':'PREVENTS', 'interromper':'PREVENTS',
+  'remove':'PREVENTS', 'remover':'PREVENTS',
+  'anula':'PREVENTS', 'anular':'PREVENTS',
+  'destroys':'PREVENTS', 'extinguishes':'PREVENTS', 'eliminates':'PREVENTS',
+  'blocks':'PREVENTS', 'prevents':'PREVENTS', 'removes':'PREVENTS',
 };
 
 // Verbos de estado/mudança tratados como IS para comparação semântica
@@ -655,12 +681,22 @@ const PropositionStore = (() => {
       ? RelationTypes[opts.forceRelation]
       : detectRelationType(spoEnrichedTokens || spoTokens);
 
-    // FIX: bloqueia ensino de fragmentos vazios — perguntas e fragmentos
-    // sem relação real detectada (UNKNOWN) E sem objecto algum não têm
-    // conteúdo factual nenhum. Ensiná-los só poluiria o store com entradas
-    // que mais tarde aparecem em queryRelevant sem servir de nada.
-    // Ex: "O que é o fogo" sem cópula reconhecida → não ensina nada.
-    if (relation.code === 'UNKNOWN' && !spo.object && !spo.predicate) {
+    // FIX ALARGADO: bloqueia ensino de relações UNKNOWN de forma mais ampla.
+    // Antes, só bloqueava quando NÃO havia objecto — mas "A água extingue
+    // o fogo" TEM objecto ("fogo"), e "extingue" nunca foi reconhecido como
+    // gatilho de relação (vocabulário incompleto). Isso deixava passar
+    // proposições como {água, UNKNOWN, fogo} com confiança 100%, renderizadas
+    // como "Água → Fogo" — factualmente vazias mas persistidas como se
+    // fossem conhecimento real, poluindo /why e /reconcile.
+    //
+    // A rede de segurança correcta não é tentar cobrir todo o vocabulário
+    // possível (sempre incompleto) — é nunca ensinar uma relação não
+    // reconhecida, mesmo com objecto presente, A MENOS que tenha sido
+    // forçada explicitamente (/catgmn, /mean) onde o humano já confirmou
+    // a relação por fora do texto.
+    if (relation.code === 'UNKNOWN' && !opts.forceRelation) {
+      console.warn('[PropStore] Relação não reconhecida — não ensinado:',
+        spo.subject, '(verbo desconhecido)', spo.object || '(sem objecto)');
       return null;
     }
 

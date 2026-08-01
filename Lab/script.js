@@ -28,6 +28,7 @@ function initWorker() {
         importScripts(
         '${baseUrl}aio-worker-v4.js',
         '${baseUrl}aio-patch-context.js',
+        '${baseUrl}aio-patch-semanticwalker.js',
         '${baseUrl}aio-patch-semantic-depth.js',
         '${baseUrl}aio-patch-orchestration.js',
         '${baseUrl}aio-patch-propositions.js',
@@ -37,8 +38,7 @@ function initWorker() {
         '${baseUrl}aio-patch-patternlayer.js',
         '${baseUrl}aio-patch-import.js',
         '${baseUrl}aio-patch-reconciliation.js',
-          '${baseUrl}aio-patch-antipattern.js,
-          '${baseUrl}aio-patch-semanticwalker.js'
+          '${baseUrl}aio-patch-antipattern.js'
         );
       } catch(e) {
         // Fallback: tenta só o v4 se os patches não existirem

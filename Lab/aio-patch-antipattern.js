@@ -108,7 +108,119 @@ const AntiPatternRegistry = (() => {
     return _failureHistory.slice(-n);
   }
 
-  return { recordFailure, checkAgainstHistory, stats, recent };
+  // ============================================================================
+  // MODERAÇÃO DA CAMADA SINÁPTICA — decisão explícita do utilizador:
+  // "não devemos simplesmente remover [a barreira]... mas moderá-la".
+  //
+  // Regra: uma ÚNICA correcção NUNCA toca pesos hebbianos — só disputas
+  // REPETIDAS do MESMO par específico (não do mesmo padrão abstracto — isso
+  // é o PatternLayer) cruzam um limiar conservador. Mesmo assim, a acção é
+  // um AMORTECIMENTO (reduz, nunca zera) escopado exclusivamente à sinapse
+  // exacta entre os dois nós envolvidos — nunca uma varredura do grafo.
+  //
+  // Testado isoladamente antes de integração: confirmado que só a sinapse
+  // fogo<->papel é tocada quando "fogo IS papel" é disputado 3 vezes,
+  // nenhuma outra sinapse de "fogo" ou "papel" é afectada.
+  // ============================================================================
+  const SYNAPTIC_DAMPEN_THRESHOLD = 3;    // conservador — muito abaixo do
+                                            // limiar estrutural do PatternLayer (10)
+  const SYNAPTIC_DAMPEN_FACTOR    = 0.4;   // reduz para 40% — nunca zera
+  const _dampenedPairs = new Map(); // "subj::obj::rel" -> { dampenedAt, factor, originalWeights }
+
+  function _pairKey(subject, object, relation) {
+    return `${subject.toLowerCase()}::${object.toLowerCase()}::${relation}`;
+  }
+
+  // Conta quantas disputas distintas envolveram este par específico
+  function countPairDisputes(subject, object, relation) {
+    return _failureHistory.filter(f =>
+      f.relation === relation &&
+      _apSimilarity(f.subject.toLowerCase(), subject.toLowerCase()) > AP_SIM_THRESHOLD &&
+      _apSimilarity(f.object.toLowerCase(), object.toLowerCase())  > AP_SIM_THRESHOLD
+    ).length;
+  }
+
+  // Encontra e amortece a sinapse hebbiana específica entre dois conceitos —
+  // AMBAS as direcções (o grafo é dirigido), nunca toca em mais nada.
+  function dampenSynapseBetween(subject, object, brainRef) {
+    if (typeof brainRef === 'undefined') return { dampened: 0 };
+
+    function findNodeId(form) {
+      let best = null;
+      brainRef.nodes.forEach(node => {
+        const lex = node.signature?.lexical?.split(' ')[0]?.toLowerCase();
+        if (lex === form.toLowerCase() && (!best || (node.fireCount||0) > (best.fireCount||0))) best = node;
+      });
+      return best?.id || null;
+    }
+
+    const subjId = findNodeId(subject);
+    const objId  = findNodeId(object);
+    if (!subjId || !objId) return { dampened: 0, reason: 'nós não encontrados' };
+
+    const originalWeights = {};
+    let dampened = 0;
+    for (const key of [`${subjId}→${objId}`, `${objId}→${subjId}`]) {
+      const syn = brainRef.synapses.get(key);
+      if (syn && !syn.pruned) {
+        originalWeights[key] = syn.weight;
+        syn.weight *= SYNAPTIC_DAMPEN_FACTOR;
+        brainRef.dirtySynapses.add(syn);
+        dampened++;
+        console.log('[AntiPattern] Sinapse amortecida:', key,
+          '(' + originalWeights[key].toFixed(3) + ' → ' + syn.weight.toFixed(3) + ')');
+      }
+    }
+    return { dampened, originalWeights, subjId, objId };
+  }
+
+  // Verifica se o par cruzou o limiar e, se sim, amortece UMA VEZ — nunca
+  // repete a acção a cada disputa subsequente do mesmo par (evita
+  // amortecimento descontrolado).
+  function checkAndDampen(subject, object, relation, brainRef) {
+    const key = _pairKey(subject, object, relation);
+    if (_dampenedPairs.has(key)) return { alreadyDampened: true };
+
+    const count = countPairDisputes(subject, object, relation);
+    if (count < SYNAPTIC_DAMPEN_THRESHOLD) return { belowThreshold: true, count };
+
+    const result = dampenSynapseBetween(subject, object, brainRef);
+    if (result.dampened > 0) {
+      _dampenedPairs.set(key, {
+        dampenedAt: Date.now(), disputeCount: count,
+        factor: SYNAPTIC_DAMPEN_FACTOR, originalWeights: result.originalWeights,
+        subject, object, relation,
+      });
+      console.log('[AntiPattern] Limiar cruzado (' + count + ' disputas) — camada sináptica moderada para:',
+        subject, relation, object);
+    }
+    return { dampened: true, count, ...result };
+  }
+
+  // ── Reversão humana — controlo a posteriori, não aprovação prévia ────────
+  // Consistente com a decisão do utilizador: o limiar conservador já é a
+  // salvaguarda; isto dá a um humano a palavra final se discordar depois.
+  function restoreDampenedPair(subject, object, relation, brainRef) {
+    const key = _pairKey(subject, object, relation);
+    const record = _dampenedPairs.get(key);
+    if (!record) return { ok: false, reason: 'não encontrado' };
+
+    for (const [synKey, originalWeight] of Object.entries(record.originalWeights)) {
+      const syn = brainRef.synapses.get(synKey);
+      if (syn) { syn.weight = originalWeight; brainRef.dirtySynapses.add(syn); }
+    }
+    _dampenedPairs.delete(key);
+    return { ok: true, restored: Object.keys(record.originalWeights).length };
+  }
+
+  function listDampenedPairs() {
+    return Array.from(_dampenedPairs.entries()).map(([key, r]) => ({ key, ...r }));
+  }
+
+  return {
+    recordFailure, checkAgainstHistory, stats, recent,
+    countPairDisputes, checkAndDampen, restoreDampenedPair, listDampenedPairs,
+  };
 })();
 
 // ============================================================================
@@ -124,7 +236,12 @@ const AntiPatternRegistry = (() => {
   PropositionStore.disputeProp = function(prop, supersedingId) {
     _orig.call(this, prop, supersedingId);
     try {
-      AntiPatternRegistry.recordFailure(prop);
+      const recorded = AntiPatternRegistry.recordFailure(prop);
+      // Só verifica moderação sináptica se o registo foi aceite (origem
+      // humana confirmada) — reaproveita o mesmo evento, sem chamada extra
+      if (recorded && prop.object && typeof brain !== 'undefined') {
+        AntiPatternRegistry.checkAndDampen(prop.subject, prop.object, prop.relation, brain);
+      }
     } catch(e) {
       console.warn('[AntiPattern] Falha ao registar:', e.message);
     }
@@ -146,13 +263,34 @@ const AntiPatternRegistry = (() => {
       const inputStr = typeof payload === 'string' ? payload : '';
       const trimmed  = inputStr.trim();
 
-      if (/^\/antipattern\s*:\s*stats\s*$/i.test(trimmed)) {
-        const s = AntiPatternRegistry.stats();
-        const recent = AntiPatternRegistry.recent(5);
-        const text = `AntiPattern: ${s.totalFailures} falhas registadas (cap ${s.cap}). ` +
-          (recent.length > 0
-            ? 'Recentes: ' + recent.map(f => `"${f.subject} ${f.relation} ${f.object}"`).join(', ')
-            : 'Sem falhas registadas ainda.');
+      const synapticListM   = /^\/synaptic\s*:\s*review\s*$/i.test(trimmed);
+      const synapticRestoreM = trimmed.match(/^\/synaptic\s*:\s*restore\s*"([^"]+)"\s+"([^"]+)"\s+(\w+)/i);
+      const antipatternStatsM = /^\/antipattern\s*:\s*stats\s*$/i.test(trimmed);
+
+      if (antipatternStatsM || synapticListM || synapticRestoreM) {
+        let text;
+
+        if (antipatternStatsM) {
+          const s = AntiPatternRegistry.stats();
+          const recent = AntiPatternRegistry.recent(5);
+          text = `AntiPattern: ${s.totalFailures} falhas registadas (cap ${s.cap}). ` +
+            (recent.length > 0
+              ? 'Recentes: ' + recent.map(f => `"${f.subject} ${f.relation} ${f.object}"`).join(', ')
+              : 'Sem falhas registadas ainda.');
+        } else if (synapticListM) {
+          const dampened = AntiPatternRegistry.listDampenedPairs();
+          text = dampened.length === 0
+            ? 'Nenhuma sinapse foi moderada ainda.'
+            : 'Sinapses moderadas: ' + dampened.map(d =>
+                `"${d.subject} ${d.relation} ${d.object}" (${d.disputeCount} disputas, factor ${d.factor})`
+              ).join(' | ') + '. Usa /synaptic:restore"sujeito" "objecto" relação para reverter.';
+        } else if (synapticRestoreM) {
+          const [, subj, obj, rel] = synapticRestoreM;
+          const r = AntiPatternRegistry.restoreDampenedPair(subj, obj, rel.toUpperCase(), brain);
+          text = r.ok
+            ? `Sinapse entre "${subj}" e "${obj}" restaurada ao peso original (${r.restored} ligações).`
+            : `Não encontrado: "${subj}" ${rel} "${obj}" não estava moderado.`;
+        }
 
         self.postMessage({
           type: 'chatResponse', cycle: brain.cycle, input: inputStr,
@@ -170,7 +308,7 @@ const AntiPatternRegistry = (() => {
     return _orig.call(this, e);
   };
 
-  console.log('[AIO-Patch] Comando /antipattern:stats activo.');
+  console.log('[AIO-Patch] Comandos /antipattern:stats /synaptic:review /synaptic:restore activos.');
 })();
 
 // ============================================================================

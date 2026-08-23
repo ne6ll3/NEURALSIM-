@@ -184,7 +184,6 @@ const PatternLayer = (() => {
         '(' + cluster.fingerprintKey + ', distinto:' + cluster.distinctCount + '/' + cluster.count + ')');
     }
 
-    _persistCluster(cluster);
     return cluster;
   }
 
@@ -224,8 +223,6 @@ const PatternLayer = (() => {
       console.log('[PatternLayer] PROMOVIDO a canonical:', cluster.id,
         '(conf:' + cluster.confidence.toFixed(3) + ', usos:' + cluster.usesSinceTracked + ')');
     }
-
-    _persistCluster(cluster);
   }
 
   // ── Decaimento periódico — chamado pelo AutonomousLoop ───────────────────
@@ -266,36 +263,6 @@ const PatternLayer = (() => {
   }
 
   // ── Comandos de decisão humana ───────────────────────────────────────────
-  // FIX: persistência real — grava o cluster completo na tabela
-  // 'patternClusters' (DB v4). Sem isto, todo o trabalho de acumular
-  // disputas, aprovar rastreamento e promover a canonical desaparecia a
-  // cada reload do worker, exactamente como aconteceu ao PropositionStore
-  // antes da correcção v3.
-  async function _persistCluster(cluster) {
-    try {
-      await DB.open();
-      await DB.patternClusters.put(cluster);
-    } catch(e) {
-      console.warn('[PatternLayer] Falha ao persistir cluster:', e.message);
-    }
-  }
-
-  // Carrega clusters do disco no arranque
-  async function warmup() {
-    try {
-      await DB.open();
-      const stored = await DB.patternClusters.toArray();
-      for (const cluster of stored) {
-        _clusters.set(cluster.fingerprintKey, cluster);
-        const num = parseInt((cluster.id || '').split('_')[1]);
-        if (!isNaN(num) && num >= _nextId) _nextId = num + 1;
-      }
-      console.log('[PatternLayer] Warmup:', stored.length, 'clusters carregados do disco');
-    } catch(e) {
-      console.warn('[PatternLayer] Warmup falhou:', e.message);
-    }
-  }
-
   function listReviewable() {
     return Array.from(_clusters.values())
       .filter(c => c.status === 'candidate' && c.distinctCount >= PatternLayerCFG.ELIGIBILITY_COUNT);
@@ -310,7 +277,6 @@ const PatternLayer = (() => {
     cluster.status     = 'tracked';
     cluster.confidence = PatternLayerCFG.INITIAL_CONFIDENCE;
     cluster.approvedAt = Date.now();
-    _persistCluster(cluster);
     return { ok: true, cluster };
   }
 
@@ -318,7 +284,6 @@ const PatternLayer = (() => {
     const cluster = Array.from(_clusters.values()).find(c => c.id === id);
     if (!cluster) return { ok: false, reason: 'not_found' };
     cluster.status = 'rejected';
-    _persistCluster(cluster);
     return { ok: true, cluster };
   }
 
@@ -338,7 +303,7 @@ const PatternLayer = (() => {
 
   return {
     recordDispute, recordCleanUse, decay, getCanonicalModifier,
-    listReviewable, track, reject, status, allClusters, stats, warmup,
+    listReviewable, track, reject, status, allClusters, stats,
     fingerprintOf, fingerprintKey, // expostos para diagnóstico/testes
   };
 })();
@@ -516,17 +481,5 @@ const PatternLayer = (() => {
       return;
     }
     return _orig.call(this, e);
-  };
-})();
-
-// ── Warmup no arranque — segue o MESMO padrão já usado em
-// aio-patch-propositions.js para PropositionStore.warmup() ──────────────────
-(function initPatternLayer() {
-  const _origMsg = self.onmessage;
-  self.onmessage = async function(e) {
-    if (e.data.command === 'init') {
-      await PatternLayer.warmup();
-    }
-    return _origMsg.call(this, e);
   };
 })();

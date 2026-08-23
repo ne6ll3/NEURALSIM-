@@ -74,24 +74,13 @@ const AntiPatternRegistry = (() => {
       return false;
     }
 
-    const entry = {
+    _failureHistory.push({
       subject:    prop.subject,
       object:     prop.object,
       relation:   prop.relation,
       disputedAt: Date.now(),
-    };
-    _failureHistory.push(entry);
+    });
     if (_failureHistory.length > MAX_HISTORY) _failureHistory.shift();
-
-    // FIX: persistência real — sem isto, todo o histórico de falhas
-    // desaparecia a cada reload, e o limiar de 3 disputas para moderação
-    // sináptica nunca conseguiria ser cruzado de forma persistente entre
-    // sessões (mesmo bug de classe já corrigido no PropositionStore v3).
-    (async () => {
-      try { await DB.open(); await DB.antipatternFailures.add(entry); }
-      catch(e) { console.warn('[AntiPattern] Falha ao persistir:', e.message); }
-    })();
-
     return true;
   }
 
@@ -197,20 +186,11 @@ const AntiPatternRegistry = (() => {
 
     const result = dampenSynapseBetween(subject, object, brainRef);
     if (result.dampened > 0) {
-      const record = {
-        key, dampenedAt: Date.now(), disputeCount: count,
+      _dampenedPairs.set(key, {
+        dampenedAt: Date.now(), disputeCount: count,
         factor: SYNAPTIC_DAMPEN_FACTOR, originalWeights: result.originalWeights,
         subject, object, relation,
-      };
-      _dampenedPairs.set(key, record);
-      // FIX: persiste o par amortecido — sem isto, um reload faria o
-      // sistema "esquecer" que já moderou esta sinapse, permitindo
-      // amortecimento repetido indefinidamente (violaria "amortece, nunca
-      // repete" que testámos e garantimos antes da entrega original).
-      (async () => {
-        try { await DB.open(); await DB.antipatternDampened.put(record); }
-        catch(e) { console.warn('[AntiPattern] Falha ao persistir amortecimento:', e.message); }
-      })();
+      });
       console.log('[AntiPattern] Limiar cruzado (' + count + ' disputas) — camada sináptica moderada para:',
         subject, relation, object);
     }
@@ -230,10 +210,6 @@ const AntiPatternRegistry = (() => {
       if (syn) { syn.weight = originalWeight; brainRef.dirtySynapses.add(syn); }
     }
     _dampenedPairs.delete(key);
-    (async () => {
-      try { await DB.open(); await DB.antipatternDampened.delete(key); }
-      catch(e) { console.warn('[AntiPattern] Falha ao remover amortecimento persistido:', e.message); }
-    })();
     return { ok: true, restored: Object.keys(record.originalWeights).length };
   }
 
@@ -241,28 +217,8 @@ const AntiPatternRegistry = (() => {
     return Array.from(_dampenedPairs.entries()).map(([key, r]) => ({ key, ...r }));
   }
 
-  // ── Warmup no arranque — carrega histórico de falhas E pares já
-  // amortecidos do disco, restaurando o estado completo entre sessões ──────
-  async function warmup() {
-    try {
-      await DB.open();
-      const failures = await DB.antipatternFailures.toArray();
-      _failureHistory.length = 0;
-      for (const f of failures) _failureHistory.push(f);
-      if (_failureHistory.length > MAX_HISTORY) _failureHistory.splice(0, _failureHistory.length - MAX_HISTORY);
-
-      const dampened = await DB.antipatternDampened.toArray();
-      for (const d of dampened) _dampenedPairs.set(d.key, d);
-
-      console.log('[AntiPattern] Warmup:', _failureHistory.length, 'falhas,',
-        _dampenedPairs.size, 'pares já moderados — carregados do disco');
-    } catch(e) {
-      console.warn('[AntiPattern] Warmup falhou:', e.message);
-    }
-  }
-
   return {
-    recordFailure, checkAgainstHistory, stats, recent, warmup,
+    recordFailure, checkAgainstHistory, stats, recent,
     countPairDisputes, checkAndDampen, restoreDampenedPair, listDampenedPairs,
   };
 })();
@@ -374,16 +330,4 @@ const AntiPatternRegistry = (() => {
   };
 
   console.log('[AIO-Patch] /why revela penalizações do AntiPatternRegistry.');
-})();
-
-// ── Warmup no arranque — segue o MESMO padrão já usado em
-// aio-patch-propositions.js e aio-patch-patternlayer.js ──────────────────────
-(function initAntiPatternRegistry() {
-  const _origMsg = self.onmessage;
-  self.onmessage = async function(e) {
-    if (e.data.command === 'init') {
-      await AntiPatternRegistry.warmup();
-    }
-    return _origMsg.call(this, e);
-  };
 })();

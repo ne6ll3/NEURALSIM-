@@ -104,9 +104,6 @@ class Dexie{
   get metacognition(){return this._tbl('metacognition');}
   get stats(){return this._tbl('stats');}
   get propositions(){return this._tbl('propositions');}
-  get patternClusters(){return this._tbl('patternClusters');}
-  get antipatternFailures(){return this._tbl('antipatternFailures');}
-  get antipatternDampened(){return this._tbl('antipatternDampened');}
   delete(){return new Promise((ok,ko)=>{const r=indexedDB.deleteDatabase(this._name);r.onsuccess=ok;r.onerror=ko;});}
   async open(){await this._open();return this;}
   async transaction(mode,tables,fn){await this._open();return fn();}
@@ -174,27 +171,21 @@ const MEMORY_CONFIG = {
 // DB
 // ============================================================================
 const DB = new Dexie('AIO_Brain_v4');
-// FIX CRÍTICO (v3): 'propositions' nunca existiu no schema original.
-// FIX CRÍTICO (v4): mesmo problema repetido em 'patternClusters' e
-// 'antipatternFailures' — o PatternLayer e o AntiPatternRegistry foram
-// construídos com a mesma disciplina de módulo isolado, mas ambos ficaram
-// só em memória, sem ninguém verificar se tinham sido de facto ligados ao
-// disco. Confirmado por grep: zero referências a DB/IndexedDB em nenhum
-// dos dois ficheiros antes desta correcção. Todo o trabalho de acumular
-// disputas, promover clusters a canonical, e moderar sinapses desaparecia
-// a cada reload — o mesmo sintoma da correcção v3, repetido por não termos
-// verificado sistematicamente as camadas seguintes.
-DB.version(4).stores({
-    nodes:                '++id, type, layer, lastFired, fireCount, *signatureTokens',
-    synapses:              '++id, source, target',
-    episodes:              '++id, cycle, timestamp',
-    patterns:              '++id, layer',
-    metacognition:         'key',
-    stats:                 'key',
-    propositions:          'id, subject, object, relation, source, state',
-    patternClusters:       'id, fingerprintKey, status',
-    antipatternFailures:   '++id, subject, object, relation',
-    antipatternDampened:   'key',
+// FIX CRÍTICO: 'propositions' nunca existiu no schema original — todo o
+// PropositionStore vivia apenas em memória, sem persistência real.
+// Qualquer reload do worker apagava TODO o conhecimento ensinado, enquanto
+// o grafo geométrico de nós sobrevivia (esse sim persistido correctamente),
+// causando o sintoma: "o agente lembra-se da geometria mas esquece os factos".
+// Versão subida de 2 para 3 para accionar onupgradeneeded e criar a tabela
+// nova sem afectar dados existentes nas outras tabelas.
+DB.version(3).stores({
+    nodes:         '++id, type, layer, lastFired, fireCount, *signatureTokens',
+    synapses:      '++id, source, target',
+    episodes:      '++id, cycle, timestamp',
+    patterns:      '++id, layer',
+    metacognition: 'key',
+    stats:         'key',
+    propositions:  'id, subject, object, relation, source, state',
 });
 
 // ============================================================================
@@ -2310,8 +2301,8 @@ const SyntacticPlanner = (() => {
         score += 0.2;
       }
     }
-
-    // Boost por popularidade (fireCount normalizado)
+    
+  // Boost por popularidade (fireCount normalizado)
     const node = brain.nodes.get(candidate.nodeId);
     if (node) {
       score += Math.min(0.3, node.fireCount / 100);

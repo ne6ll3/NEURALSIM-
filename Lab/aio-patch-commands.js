@@ -426,6 +426,28 @@ const CommandParser = (() => {
 // ============================================================================
 // PATCH DE INTEGRAÇÃO — intercepta comandos antes de qualquer processamento
 // ============================================================================
+// ============================================================================
+// GUARDA CONTRA COMANDOS QUEBRADOS — texto que tem a FORMA de um comando
+// (palavra-chave conhecida + ":" + aspas) mas sem a barra inicial. Sem isto,
+// "Reconcile:"fogo" Em um casa..." caía silenciosamente no fluxo normal de
+// teach(), sendo ensinado como se fosse uma frase factual — confirmado em
+// log real do utilizador. Intercepta ANTES do parser de comandos normal,
+// dando feedback accionável em vez de poluir o PropositionStore.
+// ============================================================================
+const KNOWN_COMMAND_VERBS = new Set([
+  'incorrect','correct','mean','oppose','forget','why','catgmn',
+  'reconcile','walk','patterns','antipattern','synaptic','name',
+]);
+
+function looksLikeBrokenCommand(text) {
+  const trimmed = (text || '').trim();
+  if (trimmed.startsWith('/')) return null; // comando válido — não é "quebrado"
+  const match = trimmed.match(/^([A-Za-zÀ-ú]+)\s*:\s*"/);
+  if (!match) return null;
+  const verb = match[1].toLowerCase();
+  return KNOWN_COMMAND_VERBS.has(verb) ? { verb, suggested: '/' + verb } : null;
+}
+
 (function applyCommandPatch() {
   const _orig = self.onmessage;
 
@@ -434,7 +456,26 @@ const CommandParser = (() => {
 
     if (command === 'perceive' || command === 'chat') {
       const inputStr = typeof payload === 'string' ? payload : '';
-      const parsed   = CommandParser.parse(inputStr);
+
+      // Intercepta ANTES de qualquer outra coisa — nunca deixa chegar a teach()
+      const broken = looksLikeBrokenCommand(inputStr);
+      if (broken) {
+        self.postMessage({
+          type: 'chatResponse', cycle: brain.cycle, input: inputStr,
+          response: {
+            text: `Isto parece um comando "${broken.verb}" sem a barra inicial. Faltou o "/"? Tenta "${broken.suggested}:..." — não vou ensinar isto como se fosse uma frase normal.`,
+            intent: 'command', regime: 'STABLE', resonance: 100,
+            plannerUsed: false, propUsed: false, isCommand: true, commandType: 'broken_command_guard',
+          },
+          decision: { action: 'command', confidence: 1.0 },
+          metacognition: serializeMeta(), stats: brain.getStats(),
+          semantic: { tokens: [], clusters: [], causalPairs: [] },
+          negation: { contradictions: [], summary: negationGraph.summarize() },
+        });
+        return;
+      }
+
+      const parsed = CommandParser.parse(inputStr);
 
       if (parsed) {
         let responseText;
